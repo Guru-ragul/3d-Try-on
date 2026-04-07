@@ -1,8 +1,82 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 3D Fit Try-On Platform
+
+A production-ready Next.js 16 application for real-time 3D garment visualization, built with TypeScript, Three.js, and deployed on Vercel.
+
+## Tech Stack
+
+- **Framework**: Next.js 16 (App Router, Turbopack)
+- **Language**: TypeScript 5
+- **3D Rendering**: Three.js + React Three Fiber + Drei
+- **Styling**: Tailwind CSS v4
+- **State**: Zustand
+- **Linting**: ESLint (Next.js config)
+- **Deployment**: Vercel
+
+## Project Structure
+
+```
+src/
+├── app/
+│   ├── page.tsx              # Landing page
+│   ├── try-on/page.tsx       # 3D try-on viewer
+│   └── api/
+│       ├── health/route.ts   # Health check endpoint
+│       └── models/route.ts   # Model listing / upload endpoint
+├── components/
+│   └── 3d/
+│       └── ModelViewer.tsx   # Three.js canvas component
+└── lib/
+    ├── constants.ts          # App-wide constants
+    └── utils.ts              # Shared utility functions
+public/
+└── models/                   # Place .glb / .gltf assets here
+```
 
 ## Getting Started
 
-First, run the development server:
+```bash
+npm install
+cp .env.local.example .env.local
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) to view the landing page, or navigate to `/try-on` for the viewer.
+
+## Available Scripts
+
+| Command | Description |
+|---------|-------------|
+| `npm run dev` | Start development server (Turbopack) |
+| `npm run build` | Build for production |
+| `npm run start` | Serve the production build |
+| `npm run lint` | Run ESLint |
+
+## Supported 3D Formats
+
+| Format | Extension |
+|--------|-----------|
+| Binary GLTF | `.glb` |
+| JSON GLTF | `.gltf` |
+| Wavefront OBJ | `.obj` |
+| Autodesk FBX | `.fbx` |
+
+## Deployment (Vercel)
+
+1. Push the repository to GitHub
+2. Import the project in [vercel.com](https://vercel.com)
+3. Set environment variables from `.env.local.example`
+4. Deploy — Vercel auto-detects Next.js
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new)
+
+## API Endpoints
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/api/health` | Health check |
+| `GET` | `/api/models` | List available models |
+| `POST` | `/api/models` | Upload a new model |
+
 
 ```bash
 npm run dev
