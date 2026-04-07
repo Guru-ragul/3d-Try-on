@@ -1,9 +1,46 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, Suspense, Component, type ReactNode } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls, PerspectiveCamera, Environment, useGLTF } from '@react-three/drei';
+import { OrbitControls, PerspectiveCamera, useGLTF } from '@react-three/drei';
 import type { Group } from 'three';
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class CanvasErrorBoundary extends Component<
+  { children: ReactNode; onError?: (e: Error) => void },
+  ErrorBoundaryState
+> {
+  constructor(props: { children: ReactNode; onError?: (e: Error) => void }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error) {
+    this.props.onError?.(error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="w-full h-full bg-slate-900 flex items-center justify-center">
+          <div className="text-center px-4">
+            <p className="text-red-400 font-semibold mb-2">Failed to render 3D view</p>
+            <p className="text-slate-400 text-sm">{this.state.error?.message}</p>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 interface ModelViewerProps {
   modelUrl?: string;
@@ -37,7 +74,7 @@ function GltfModel({ url, onLoaded }: { url: string; onLoaded?: () => void }) {
     onLoaded?.();
   }, [onLoaded]);
 
-  return <primitive object={scene} />;
+  return <primitive object={scene} dispose={null} />;
 }
 
 export function ModelViewer({ modelUrl, onModelLoaded, onError }: ModelViewerProps) {
@@ -49,24 +86,29 @@ export function ModelViewer({ modelUrl, onModelLoaded, onError }: ModelViewerPro
 
   return (
     <div className="relative w-full h-full bg-gradient-to-b from-slate-900 to-slate-800">
-      <Canvas>
-        <PerspectiveCamera makeDefault position={[0, 0, 2.5]} fov={75} />
+      <CanvasErrorBoundary onError={onError}>
+        <Canvas>
+          <PerspectiveCamera makeDefault position={[0, 0, 2.5]} fov={75} />
 
-        <ambientLight intensity={0.5} />
-        <directionalLight position={[5, 10, 8]} intensity={1} />
+          <ambientLight intensity={0.6} />
+          <directionalLight position={[5, 10, 8]} intensity={1.2} />
+          <directionalLight position={[-5, -5, -5]} intensity={0.3} />
+          <hemisphereLight args={['#c7d4f0', '#1e293b', 0.5]} />
 
-        {modelUrl ? (
-          <GltfModel
-            url={modelUrl}
-            onLoaded={() => setIsLoading(false)}
-          />
-        ) : (
-          <PlaceholderMesh />
-        )}
+          <Suspense fallback={null}>
+            {modelUrl ? (
+              <GltfModel
+                url={modelUrl}
+                onLoaded={() => setIsLoading(false)}
+              />
+            ) : (
+              <PlaceholderMesh />
+            )}
+          </Suspense>
 
-        <OrbitControls autoRotate={!modelUrl} autoRotateSpeed={2} />
-        <Environment preset="city" />
-      </Canvas>
+          <OrbitControls autoRotate={!modelUrl} autoRotateSpeed={2} />
+        </Canvas>
+      </CanvasErrorBoundary>
 
       {isLoading && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/50">
