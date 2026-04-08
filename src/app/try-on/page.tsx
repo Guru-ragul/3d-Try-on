@@ -432,6 +432,7 @@ export default function TryOnPage() {
   const [measures,    setMeasures]    = useState<MeasureState>({ height: '', weight: '', chest: '', waist: '', hips: '' });
   const [productState, setProductState] = useState<ProductState>({ status: 'idle' });
   const [tryOnState,   setTryOnState]   = useState<TryOnState>({ status: 'idle' });
+  const [provider,     setProvider]     = useState<'replicate' | 'hf'>('replicate');
 
   const garmentImageUrl = productState.status === 'done' ? productState.imageUrl : null;
   const cfg = category ? CATEGORY_CONFIG[category] : null;
@@ -460,7 +461,7 @@ export default function TryOnPage() {
     }
   };
 
-  // Start one prediction and return its id
+  // Start one prediction. Replicate returns { id, fit }; HF returns { imageUrl, fit } directly.
   const startPrediction = async (compressedUser: string, seed: number) => {
     const res = await fetch('/api/tryon', {
       method:  'POST',
@@ -471,10 +472,11 @@ export default function TryOnPage() {
         garmentDescription: garmentDesc,
         category,
         seed,
+        provider,
         measurements: { size: productSize, ...measures },
       }),
     });
-    return res.json() as Promise<{ id?: string; fit?: FitResult; error?: string }>;
+    return res.json() as Promise<{ id?: string; imageUrl?: string; fit?: FitResult; error?: string }>;
   };
 
   // Poll one prediction id until succeeded/failed. Returns output URL or null.
@@ -501,11 +503,28 @@ export default function TryOnPage() {
         ? await compressImage(userImage!)
         : userImage!;
 
-      // Start 2 generations in parallel with different seeds for variety
-      setTryOnState({ status: 'loading', message: 'Starting 2 AI generations…' });
-      const SEEDS = [42, 137];
+      // HF is synchronous so only 1 call; Replicate uses 2 seeds for variety
+      const SEEDS = provider === 'hf' ? [42] : [42, 137];
+      setTryOnState({ status: 'loading', message: provider === 'hf' ? 'Running on HuggingFace… (~45–90s)' : 'Starting 2 AI generations…' });
       const starts = await Promise.all(SEEDS.map(s => startPrediction(compressedUser, s)));
 
+      // ── HuggingFace: response contains imageUrl directly (no polling) ────
+      if (provider === 'hf') {
+        const result = starts[0];
+        if (result?.error) {
+          setTryOnState({ status: 'error', message: result.error });
+          return;
+        }
+        if (result?.imageUrl) {
+          setTryOnState({ status: 'done', imageUrl: result.imageUrl, fit: result.fit ?? null, alternatives: [] });
+          setStep(2);
+          return;
+        }
+        setTryOnState({ status: 'error', message: 'HuggingFace did not return an image. Try again.' });
+        return;
+      }
+
+      // ── Replicate: poll prediction ids ──────────────────────────────────────
       const validStarts = starts.filter(d => !!d.id);
       if (validStarts.length === 0) {
         setTryOnState({ status: 'error', message: starts[0]?.error ?? 'Failed to start generation.' });
@@ -517,19 +536,16 @@ export default function TryOnPage() {
       setTryOnState({ status: 'loading', message: 'AI is generating your try-on… (~30–45s)' });
 
       // Poll all ids; show the first that succeeds, collect the rest as alternatives
-      const results: string[] = [];
       let shown = false;
 
       await Promise.all(ids.map(async id => {
         const url = await pollUntilDone(id);
         if (!url) return;
-        results.push(url);
         if (!shown) {
           shown = true;
           setTryOnState({ status: 'done', imageUrl: url, fit, alternatives: [] });
           setStep(2);
         } else {
-          // Second result arrives: add as alternative
           setTryOnState(prev =>
             prev.status === 'done'
               ? { ...prev, alternatives: [...prev.alternatives, url] }
@@ -743,6 +759,22 @@ export default function TryOnPage() {
                 </div>
               </div>
             </section>
+
+            {/* Provider toggle */}
+            <div className="flex items-center justify-center gap-1 p-1 bg-slate-800 rounded-xl text-xs font-semibold">
+              <button
+                onClick={() => setProvider('replicate')}
+                className={`flex-1 py-2 rounded-lg transition-colors ${provider === 'replicate' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+              >
+                Replicate <span className="opacity-60 font-normal">(paid)</span>
+              </button>
+              <button
+                onClick={() => setProvider('hf')}
+                className={`flex-1 py-2 rounded-lg transition-colors ${provider === 'hf' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}
+              >
+                HuggingFace <span className="opacity-60 font-normal">(free)</span>
+              </button>
+            </div>
 
             <button
               onClick={handleGenerate}

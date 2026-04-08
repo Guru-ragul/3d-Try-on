@@ -60,26 +60,56 @@ export async function POST(req: Request) {
       return Response.json({ error: 'URL must use http or https.' }, { status: 400 });
     }
 
-    const fetchRes = await fetch(rawUrl, {
-      headers: {
-        // Mimic a real browser to avoid bot blocks
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cache-Control': 'no-cache',
-      },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(10000),
-    });
+    const BROWSER_HEADERS = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Language': 'en-IN,en-US;q=0.9,en;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-User': '?1',
+      'Upgrade-Insecure-Requests': '1',
+      'DNT': '1',
+    };
 
-    if (!fetchRes.ok) {
-      return Response.json(
-        { error: `Could not fetch the product page (HTTP ${fetchRes.status}). The site may block scraping. Try copying the direct image URL instead.` },
-        { status: 502 },
+    // Try direct fetch first
+    let html = '';
+    let finalUrl = rawUrl;
+
+    const tryFetch = async (url: string): Promise<{ ok: boolean; html: string; finalUrl: string }> => {
+      const r = await fetch(url, {
+        headers: BROWSER_HEADERS,
+        redirect: 'follow',
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!r.ok) return { ok: false, html: '', finalUrl: url };
+      return { ok: true, html: await r.text(), finalUrl: r.url || url };
+    };
+
+    const direct = await tryFetch(rawUrl);
+    if (direct.ok) {
+      html     = direct.html;
+      finalUrl = direct.finalUrl;
+    } else {
+      // Fallback: route through allorigins (server-side proxy)
+      const proxied = await tryFetch(
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(rawUrl)}`,
       );
+      if (proxied.ok) {
+        html     = proxied.html;
+        finalUrl = rawUrl; // keep original for ASIN extraction
+      } else {
+        return Response.json(
+          {
+            error: `Could not fetch the product page (HTTP ${direct.ok ? 200 : 'blocked'}). The site may block scraping. Try copying the direct image URL instead.`,
+            tip: 'Right-click the product image → "Copy image address" and paste below.',
+          },
+          { status: 502 },
+        );
+      }
     }
 
-    const html = await fetchRes.text();
     const $ = cheerio.load(html);
 
     // Cascade of selectors — covers Amazon, Myntra, AJIO, Flipkart, generic OG
@@ -120,9 +150,9 @@ export async function POST(req: Request) {
       );
     }
 
-    // Resolve relative URLs
+    // Resolve relative URLs against the final (post-redirect) page URL
     const absoluteImage = imageUrl.startsWith('/')
-      ? `${parsedUrl.origin}${imageUrl}`
+      ? `${new URL(finalUrl).origin}${imageUrl}`
       : imageUrl;
 
     const cleanTitle = title.slice(0, 120);
