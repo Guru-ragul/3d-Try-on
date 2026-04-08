@@ -30,9 +30,10 @@ export async function POST(req: Request) {
       garmentDescription?: string;
       measurements?: Measurements;
       category?: string;
+      seed?: number;
     };
 
-    const { userImage, garmentImage, garmentDescription, measurements, category } = body;
+    const { userImage, garmentImage, garmentDescription, measurements, category, seed } = body;
 
     if (!validImage(userImage) || !validImage(garmentImage)) {
       return Response.json(
@@ -63,7 +64,7 @@ export async function POST(req: Request) {
           is_checked:      true,
           is_checked_crop: false,
           denoise_steps:   30,
-          seed:            42,
+          seed:            typeof seed === 'number' ? seed : 42,
         },
       }),
     });

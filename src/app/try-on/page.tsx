@@ -10,7 +10,7 @@ import { getRecommendations } from '@/lib/recommend';
 type TryOnState =
   | { status: 'idle' }
   | { status: 'loading'; message: string }
-  | { status: 'done'; imageUrl: string; fit: FitResult | null }
+  | { status: 'done'; imageUrl: string; fit: FitResult | null; alternatives: string[] }
   | { status: 'error'; message: string };
 
 type ProductState =
@@ -460,6 +460,38 @@ export default function TryOnPage() {
     }
   };
 
+  // Start one prediction and return its id
+  const startPrediction = async (compressedUser: string, seed: number) => {
+    const res = await fetch('/api/tryon', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userImage:          compressedUser,
+        garmentImage:       garmentImageUrl,
+        garmentDescription: garmentDesc,
+        category,
+        seed,
+        measurements: { size: productSize, ...measures },
+      }),
+    });
+    return res.json() as Promise<{ id?: string; fit?: FitResult; error?: string }>;
+  };
+
+  // Poll one prediction id until succeeded/failed. Returns output URL or null.
+  const pollUntilDone = async (id: string): Promise<string | null> => {
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const pollRes  = await fetch(`/api/tryon?id=${encodeURIComponent(id)}`);
+      const pollData = await pollRes.json() as { status: string; output?: string | string[]; error?: string; detail?: string };
+      if (pollData.status === 'succeeded') {
+        const url = Array.isArray(pollData.output) ? pollData.output[0] : pollData.output;
+        return url ?? null;
+      }
+      if (pollData.status === 'failed' || pollData.status === 'canceled') return null;
+    }
+    return null; // timeout
+  };
+
   const handleGenerate = async () => {
     if (!canGenerate || !category) return;
     setTryOnState({ status: 'loading', message: 'Compressing photo…' });
@@ -469,42 +501,46 @@ export default function TryOnPage() {
         ? await compressImage(userImage!)
         : userImage!;
 
-      setTryOnState({ status: 'loading', message: 'Starting AI generation…' });
-      const startRes = await fetch('/api/tryon', {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userImage: compressedUser,
-          garmentImage: garmentImageUrl,
-          garmentDescription: garmentDesc,
-          category,
-          measurements: { size: productSize, ...measures },
-        }),
-      });
-      const startData = await startRes.json() as { id?: string; fit?: FitResult; error?: string };
-      if (!startRes.ok || !startData.id) {
-        setTryOnState({ status: 'error', message: startData.error ?? 'Failed to start.' });
+      // Start 2 generations in parallel with different seeds for variety
+      setTryOnState({ status: 'loading', message: 'Starting 2 AI generations…' });
+      const SEEDS = [42, 137];
+      const starts = await Promise.all(SEEDS.map(s => startPrediction(compressedUser, s)));
+
+      const validStarts = starts.filter(d => !!d.id);
+      if (validStarts.length === 0) {
+        setTryOnState({ status: 'error', message: starts[0]?.error ?? 'Failed to start generation.' });
         return;
       }
-      const { id, fit } = startData;
-      setTryOnState({ status: 'loading', message: 'AI is generating your try-on… (~30s)' });
-      for (let i = 0; i < 60; i++) {
-        await new Promise(r => setTimeout(r, 3000));
-        const pollRes  = await fetch(`/api/tryon?id=${encodeURIComponent(id)}`);
-        const pollData = await pollRes.json() as { status: string; output?: string | string[]; error?: string };
-        if (pollData.status === 'succeeded') {
-          const imageUrl = Array.isArray(pollData.output) ? pollData.output[0] : pollData.output;
-          if (!imageUrl) { setTryOnState({ status: 'error', message: 'AI returned empty result.' }); return; }
-          setTryOnState({ status: 'done', imageUrl, fit: fit ?? null });
+      const fit = validStarts[0].fit ?? null;
+      const ids = validStarts.map(d => d.id!);
+
+      setTryOnState({ status: 'loading', message: 'AI is generating your try-on… (~30–45s)' });
+
+      // Poll all ids; show the first that succeeds, collect the rest as alternatives
+      const results: string[] = [];
+      let shown = false;
+
+      await Promise.all(ids.map(async id => {
+        const url = await pollUntilDone(id);
+        if (!url) return;
+        results.push(url);
+        if (!shown) {
+          shown = true;
+          setTryOnState({ status: 'done', imageUrl: url, fit, alternatives: [] });
           setStep(2);
-          return;
+        } else {
+          // Second result arrives: add as alternative
+          setTryOnState(prev =>
+            prev.status === 'done'
+              ? { ...prev, alternatives: [...prev.alternatives, url] }
+              : prev
+          );
         }
-        if (pollData.status === 'failed' || pollData.status === 'canceled') {
-          setTryOnState({ status: 'error', message: pollData.error ?? 'Generation failed.' });
-          return;
-        }
+      }));
+
+      if (!shown) {
+        setTryOnState({ status: 'error', message: 'Generation timed out or failed. Please try again.' });
       }
-      setTryOnState({ status: 'error', message: 'Timed out. Please try again.' });
     } catch (err) {
       setTryOnState({ status: 'error', message: (err as Error).message });
     }
@@ -526,6 +562,9 @@ export default function TryOnPage() {
   }
 
   if (step === 2 && tryOnState.status === 'done') {
+    const { imageUrl, fit, alternatives } = tryOnState;
+    const buyUrl = productState.status === 'done' ? productState.affiliateUrl : undefined;
+    const productImg = productState.status === 'done' ? productState.imageUrl : undefined;
     return (
       <main className="min-h-screen bg-slate-950 text-white">
         <Header category={category!} cfg={cfg!} onReset={reset} />
@@ -535,21 +574,105 @@ export default function TryOnPage() {
               {cfg.tryOnNote}
             </div>
           )}
+
+          {/* ── Main result row ─────────────────────────────────────────── */}
           <div className="grid lg:grid-cols-2 gap-6">
             <section className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden">
               <div className="px-5 pt-4 pb-2 text-xs font-semibold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                 <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />AI Try-On Result
+                {alternatives.length > 0 && (
+                  <span className="ml-auto text-slate-500">{alternatives.length + 1} variations generated</span>
+                )}
               </div>
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={tryOnState.imageUrl} alt="AI try-on result" className="w-full object-contain" />
+              <img src={imageUrl} alt="AI try-on result" className="w-full object-contain" />
+
+              {/* ── Alternatives strip ───────────────────────────────── */}
+              {alternatives.length > 0 && (
+                <div className="px-4 pb-3 space-y-2">
+                  <p className="text-xs text-slate-500">Other variation</p>
+                  <div className="flex gap-2">
+                    {alternatives.map((alt, i) => (
+                      <button
+                        key={i}
+                        onClick={() => setTryOnState(prev =>
+                          prev.status === 'done'
+                            ? { ...prev, imageUrl: alt, alternatives: [imageUrl, ...prev.alternatives.filter(a => a !== alt)] }
+                            : prev
+                        )}
+                        className="w-16 h-20 rounded-lg overflow-hidden border-2 border-slate-700 hover:border-blue-500 transition-colors shrink-0"
+                        title="Use this variation"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img src={alt} alt={`Variation ${i + 2}`} className="w-full h-full object-cover" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="p-4 flex items-center gap-4">
-                <a href={tryOnState.imageUrl} download="tryon-result.png" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300 underline">Download image</a>
-                <button onClick={() => setStep(1)} className="text-xs text-slate-500 hover:text-white transition-colors">&larr; Back to adjust</button>
+                <a href={imageUrl} download="tryon-result.png" target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300 underline">Download image</a>
+                <button onClick={() => setStep(1)} className="text-xs text-slate-500 hover:text-white transition-colors">&larr; Adjust</button>
               </div>
             </section>
-            <FitPanel fit={tryOnState.fit} productSize={productSize} />
+
+            <div className="space-y-5">
+              <FitPanel fit={fit} productSize={productSize} />
+
+              {/* ── Buy CTA ─────────────────────────────────────────── */}
+              <div className="bg-slate-900 rounded-2xl border border-slate-800 p-5 space-y-4">
+                <div className="flex items-center gap-4">
+                  {productImg && (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={productImg} alt="Product" className="w-16 h-20 object-cover rounded-lg border border-slate-700 shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-slate-500 mb-1">You tried on</p>
+                    <p className="text-sm font-semibold text-white line-clamp-2">
+                      {productState.status === 'done' ? productState.title : 'This product'}
+                    </p>
+                    {fit && (
+                      <p className="text-xs mt-1">
+                        <span className={fit.score >= 85 ? 'text-emerald-400' : fit.score >= 70 ? 'text-yellow-400' : 'text-orange-400'}>
+                          {fit.label}
+                        </span>
+                        {' '}in size <strong className="text-white">{productSize}</strong>
+                        {fit.suggestedSize !== productSize && (
+                          <span className="text-yellow-400"> (try {fit.suggestedSize})</span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                {buyUrl ? (
+                  <a
+                    href={buyUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 w-full py-3.5 rounded-xl font-bold text-base bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-400 hover:to-amber-400 text-white transition-all shadow-lg"
+                  >
+                    🛒 Buy on Amazon
+                  </a>
+                ) : (
+                  <button
+                    onClick={() => setStep(1)}
+                    className="w-full py-3.5 rounded-xl font-bold text-base bg-slate-800 hover:bg-slate-700 text-white transition-colors"
+                  >
+                    Try a different product
+                  </button>
+                )}
+                <button
+                  onClick={() => { setStep(1); setTryOnState({ status: 'idle' }); }}
+                  className="w-full py-2 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                >
+                  Generate again with same product
+                </button>
+              </div>
+            </div>
           </div>
-          <RecommendationPanel category={category!} selectedSize={productSize} fit={tryOnState.fit} />
+
+          <RecommendationPanel category={category!} selectedSize={productSize} fit={fit} />
           <div className="text-center">
             <button onClick={reset} className="px-6 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-sm font-semibold text-white transition-colors">Try another product</button>
           </div>
@@ -642,9 +765,17 @@ export default function TryOnPage() {
             )}
 
             {tryOnState.status === 'error' && (
-              <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-4 text-sm text-red-300">
-                <p className="font-semibold mb-1">Error</p>
-                <p>{tryOnState.message}</p>
+              <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-4 text-sm text-red-300 space-y-3">
+                <div>
+                  <p className="font-semibold mb-1">Generation failed</p>
+                  <p>{tryOnState.message}</p>
+                </div>
+                <button
+                  onClick={() => { setTryOnState({ status: 'idle' }); handleGenerate(); }}
+                  className="flex items-center gap-2 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-200 rounded-lg text-xs font-semibold transition-colors"
+                >
+                  ↺ Try again
+                </button>
               </div>
             )}
           </div>
