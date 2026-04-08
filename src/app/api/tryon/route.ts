@@ -1,4 +1,5 @@
 import { calculateFit, type Measurements } from '@/lib/fit';
+import { CATEGORY_CONFIG, type ProductCategory } from '@/lib/product';
 
 export const maxDuration = 60;
 
@@ -28,9 +29,10 @@ export async function POST(req: Request) {
       garmentImage: string;
       garmentDescription?: string;
       measurements?: Measurements;
+      category?: string;
     };
 
-    const { userImage, garmentImage, garmentDescription, measurements } = body;
+    const { userImage, garmentImage, garmentDescription, measurements, category } = body;
 
     if (!validImage(userImage) || !validImage(garmentImage)) {
       return Response.json(
@@ -75,7 +77,9 @@ export async function POST(req: Request) {
     }
 
     const prediction = await replicateRes.json() as { id: string; [key: string]: unknown };
-    const fit = measurements?.size ? calculateFit(measurements) : null;
+    const cat = (category as ProductCategory | undefined);
+    const fitWeights = cat && CATEGORY_CONFIG[cat] ? CATEGORY_CONFIG[cat].fitWeights : undefined;
+    const fit = measurements?.size ? calculateFit(measurements, fitWeights) : null;
 
     return Response.json({ id: prediction.id, fit });
   } catch (err) {

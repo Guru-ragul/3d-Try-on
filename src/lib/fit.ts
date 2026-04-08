@@ -133,7 +133,14 @@ function findBestSize(measured: Partial<Record<'chest' | 'waist' | 'hips', numbe
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
-export function calculateFit(measurements: Measurements): FitResult {
+/** Optional per-category weights — must sum to 1 */
+export interface FitWeightsInput {
+  chest: number;
+  waist: number;
+  hips: number;
+}
+
+export function calculateFit(measurements: Measurements, fitWeights?: FitWeightsInput): FitResult {
   const { size = 'M' } = measurements;
   const sizeData = SIZE_CHART[size] ?? SIZE_CHART['M'];
 
@@ -146,8 +153,8 @@ export function calculateFit(measurements: Measurements): FitResult {
   const waistVal = parse(measurements.waist);
   const hipsVal  = parse(measurements.hips);
 
-  // Weights (must sum to 1)
-  const WEIGHTS = { chest: 0.40, waist: 0.40, hips: 0.20 } as const;
+  // Weights (must sum to 1) — caller can override per category
+  const WEIGHTS = fitWeights ?? { chest: 0.40, waist: 0.40, hips: 0.20 };
 
   const breakdown: AreaBreakdown[] = [];
   let weightedScore = 0;
