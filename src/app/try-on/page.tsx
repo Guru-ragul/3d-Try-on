@@ -16,7 +16,7 @@ type TryOnState =
 type ProductState =
   | { status: 'idle' }
   | { status: 'loading' }
-  | { status: 'done'; imageUrl: string; title: string }
+  | { status: 'done'; imageUrl: string; title: string; affiliateUrl?: string }
   | { status: 'error'; message: string };
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -27,6 +27,28 @@ function fileToDataURL(file: File): Promise<string> {
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = reject;
     reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Resize + re-encode to JPEG so the base64 payload stays under Vercel's 4.5 MB
+ * body limit. A 12 MP phone photo is ~4-8 MB raw; after this it's ~150-350 KB.
+ */
+function compressImage(dataUrl: string, maxPx = 1024, quality = 0.85): Promise<string> {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, maxPx / Math.max(img.width, img.height, 1));
+      const w = Math.round(img.width  * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width  = w;
+      canvas.height = h;
+      canvas.getContext('2d')!.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', quality));
+    };
+    img.onerror = () => resolve(dataUrl); // fallback: send as-is
+    img.src = dataUrl;
   });
 }
 
@@ -170,7 +192,12 @@ function ProductFetcher({ productState, onFetch, onClear, onDirectImage }: {
           <div className="flex-1 min-w-0">
             <p className="text-sm text-white font-medium line-clamp-2">{productState.title}</p>
             <p className="text-xs text-emerald-400 mt-1">&#x2713; Product image fetched</p>
-            <button onClick={onClear} className="text-xs text-slate-500 hover:text-red-400 transition-colors mt-2">Clear</button>
+            <div className="flex items-center gap-3 mt-2">
+              <button onClick={onClear} className="text-xs text-slate-500 hover:text-red-400 transition-colors">Clear</button>
+              {productState.affiliateUrl && (
+                <a href={productState.affiliateUrl} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300 transition-colors">Buy on Amazon &rarr;</a>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -421,11 +448,11 @@ export default function TryOnPage() {
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ url }),
       });
-      const data = await res.json() as { imageUrl?: string; title?: string; error?: string };
+      const data = await res.json() as { imageUrl?: string; title?: string; affiliateUrl?: string; error?: string };
       if (!res.ok || !data.imageUrl) {
         setProductState({ status: 'error', message: data.error ?? 'Could not fetch product image.' });
       } else {
-        setProductState({ status: 'done', imageUrl: data.imageUrl, title: data.title ?? 'Product' });
+        setProductState({ status: 'done', imageUrl: data.imageUrl, title: data.title ?? 'Product', affiliateUrl: data.affiliateUrl });
         if (!garmentDesc && data.title) setGarmentDesc(data.title.slice(0, 120));
       }
     } catch (err) {
@@ -435,13 +462,19 @@ export default function TryOnPage() {
 
   const handleGenerate = async () => {
     if (!canGenerate || !category) return;
-    setTryOnState({ status: 'loading', message: 'Starting AI generation…' });
+    setTryOnState({ status: 'loading', message: 'Compressing photo…' });
     try {
+      // Compress client-side: keeps JSON body well under Vercel's 4.5 MB limit
+      const compressedUser = userImage!.startsWith('data:')
+        ? await compressImage(userImage!)
+        : userImage!;
+
+      setTryOnState({ status: 'loading', message: 'Starting AI generation…' });
       const startRes = await fetch('/api/tryon', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userImage,
+          userImage: compressedUser,
           garmentImage: garmentImageUrl,
           garmentDescription: garmentDesc,
           category,

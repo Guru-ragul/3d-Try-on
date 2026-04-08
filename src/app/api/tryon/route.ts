@@ -68,15 +68,25 @@ export async function POST(req: Request) {
       }),
     });
 
-    if (!replicateRes.ok) {
-      const errBody = await replicateRes.text();
+    // Always read as text first — Replicate occasionally returns plain-text
+    // errors (e.g. "Request Entity Too Large") that crash JSON.parse().
+    const rawText = await replicateRes.text();
+    let predictionBody: Record<string, unknown>;
+    try {
+      predictionBody = JSON.parse(rawText) as Record<string, unknown>;
+    } catch {
       return Response.json(
-        { error: `Replicate API error (${replicateRes.status}): ${errBody}` },
+        { error: `Replicate returned non-JSON (HTTP ${replicateRes.status}): ${rawText.slice(0, 200)}` },
         { status: 502 },
       );
     }
 
-    const prediction = await replicateRes.json() as { id: string; [key: string]: unknown };
+    if (!replicateRes.ok) {
+      const detail = typeof predictionBody.detail === 'string' ? predictionBody.detail : rawText.slice(0, 200);
+      return Response.json({ error: `Replicate API error (${replicateRes.status}): ${detail}` }, { status: 502 });
+    }
+
+    const prediction = predictionBody as { id: string; [key: string]: unknown };
     const cat = (category as ProductCategory | undefined);
     const fitWeights = cat && CATEGORY_CONFIG[cat] ? CATEGORY_CONFIG[cat].fitWeights : undefined;
     const fit = measurements?.size ? calculateFit(measurements, fitWeights) : null;
@@ -105,11 +115,16 @@ export async function GET(req: Request) {
 
     if (!res.ok) {
       const errBody = await res.text();
-      return Response.json({ error: `Replicate poll error (${res.status}): ${errBody}` }, { status: 502 });
+      return Response.json({ error: `Replicate poll error (${res.status}): ${errBody.slice(0, 200)}` }, { status: 502 });
     }
 
-    const prediction = await res.json();
-    return Response.json(prediction);
+    const rawPoll = await res.text();
+    try {
+      const prediction = JSON.parse(rawPoll);
+      return Response.json(prediction);
+    } catch {
+      return Response.json({ error: `Non-JSON poll response: ${rawPoll.slice(0, 200)}` }, { status: 502 });
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Unknown error';
     return Response.json({ error: message }, { status: 500 });

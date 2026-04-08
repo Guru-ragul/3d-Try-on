@@ -1,5 +1,40 @@
 import * as cheerio from 'cheerio';
 
+// ─── Affiliate tag ────────────────────────────────────────────────────────────
+const AMAZON_AFFILIATE_TAG = '97870-21';
+
+function buildAffiliateLink(rawUrl: string): string | null {
+  try {
+    const match = rawUrl.match(/\/dp\/([A-Z0-9]{10})/i);
+    if (!match) return null;
+    return `https://www.amazon.in/dp/${match[1]}?tag=${AMAZON_AFFILIATE_TAG}`;
+  } catch { return null; }
+}
+
+// ─── Normalisation helpers ────────────────────────────────────────────────────
+function detectCategory(title: string): 'top' | 'bottom' | 'full' {
+  const t = title.toLowerCase();
+  if (/pant|jean|trouser|short|skirt|legging|chino/.test(t)) return 'bottom';
+  if (/dress|suit|co-ord|coord|jumpsuit|dungaree|saree|kurta set/.test(t)) return 'full';
+  return 'top'; // default: shirt, t-shirt, jacket, hoodie, etc.
+}
+
+function detectFit(title: string): 'slim' | 'regular' | 'oversized' {
+  const t = title.toLowerCase();
+  if (/slim|skinny|fitted/.test(t))     return 'slim';
+  if (/oversized|baggy|loose|relaxed/.test(t)) return 'oversized';
+  return 'regular';
+}
+
+function detectFabric(title: string): string {
+  const t = title.toLowerCase();
+  if (/cotton/.test(t)) return 'cotton';
+  if (/poly|polyester/.test(t)) return 'polyester';
+  if (/linen/.test(t)) return 'linen';
+  if (/denim/.test(t)) return 'denim';
+  return 'blend';
+}
+
 // Block obviously non-product URLs
 const ALLOWED_HOSTS = /\.(amazon\.|flipkart\.|myntra\.|ajio\.|meesho\.|nordstrom\.|zara\.|hm\.|uniqlo\.|asos\.|shopify\.com|shopifypreview\.com|cdn\.|static\.|media\.)/i;
 const URL_RE = /^https?:\/\/.{4,}/;
@@ -90,7 +125,19 @@ export async function POST(req: Request) {
       ? `${parsedUrl.origin}${imageUrl}`
       : imageUrl;
 
-    return Response.json({ imageUrl: absoluteImage, title: title.slice(0, 120) });
+    const cleanTitle = title.slice(0, 120);
+    const affiliateUrl = buildAffiliateLink(rawUrl) ?? rawUrl;
+
+    return Response.json({
+      imageUrl:     absoluteImage,
+      title:        cleanTitle,
+      affiliateUrl,
+      // Normalised product metadata (used by recommendation engine)
+      category:     detectCategory(cleanTitle),
+      fit:          detectFit(cleanTitle),
+      fabric:       detectFabric(cleanTitle),
+      stretch:      cleanTitle.toLowerCase().includes('stretch'),
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const isTimeout = msg.includes('timeout') || msg.includes('AbortError');
