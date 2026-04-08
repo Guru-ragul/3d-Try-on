@@ -48,8 +48,9 @@ export async function POST(req: Request) {
 
     const token = getToken();
 
-    // Call Replicate directly with correct Authorization header format
-    const replicateRes = await fetch('https://api.replicate.com/v1/models/cuuupid/idm-vton/predictions', {
+    // Use version-based predictions endpoint (model direct endpoint returns 404)
+    const IDM_VTON_VERSION = '0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985';
+    const replicateRes = await fetch('https://api.replicate.com/v1/predictions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -57,6 +58,7 @@ export async function POST(req: Request) {
         'Prefer': 'wait=5',
       },
       body: JSON.stringify({
+        version: IDM_VTON_VERSION,
         input: {
           human_img:       userImage,
           garm_img:        garmentImage,
