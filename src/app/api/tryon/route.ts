@@ -29,9 +29,13 @@ async function runWithHuggingFace(
   const session_hash = Math.random().toString(36).slice(2, 14);
 
   // Gradio 4.x queue/join — fn_index 0 is the only (/tryon) endpoint
+  const hfToken = process.env.HUGGINGFACE_TOKEN;
+  const hfHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (hfToken) hfHeaders['Authorization'] = `Bearer ${hfToken}`;
+
   const joinRes = await fetch(`${HF_SPACE}/queue/join`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: hfHeaders,
     body: JSON.stringify({
       data: [
         // param 1: dict (ImageEditor) — background holds the human image
@@ -50,8 +54,10 @@ async function runWithHuggingFace(
   if (!joinRes.ok) throw new Error(`HF queue join failed (${joinRes.status})`);
 
   // Read SSE events until process_completed
+  const sseHeaders: Record<string, string> = { Accept: 'text/event-stream' };
+  if (hfToken) sseHeaders['Authorization'] = `Bearer ${hfToken}`;
   const sseRes = await fetch(`${HF_SPACE}/queue/data?session_hash=${session_hash}`, {
-    headers: { Accept: 'text/event-stream' },
+    headers: sseHeaders,
     signal: AbortSignal.timeout(55_000),
   });
   if (!sseRes.ok) throw new Error('HF SSE connection failed');
