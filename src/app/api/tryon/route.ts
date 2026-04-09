@@ -21,29 +21,83 @@ function getToken(): string {
 // ─── HuggingFace Space provider (free) ─────────────────────────────────────
 const HF_SPACE = 'https://yisol-idm-vton.hf.space';
 
+/**
+ * Upload an image (base64 data URI OR public https URL) to the HF Space
+ * via its /upload endpoint and return the server-side file path.
+ *
+ * ROOT CAUSE FIX: Gradio cannot fetch base64 data URIs as "url" values.
+ * All images must be uploaded first, then referenced by path.
+ */
+async function uploadImageToHF(
+  image: string,
+  filename: string,
+  authHeader?: string,
+): Promise<string> {
+  let blob: Blob;
+
+  if (image.startsWith('data:')) {
+    const [meta, b64] = image.split(',');
+    const mime = meta.match(/data:([^;]+)/)?.[1] ?? 'image/jpeg';
+    blob = new Blob([Buffer.from(b64, 'base64')], { type: mime });
+  } else {
+    const r = await fetch(image, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) throw new Error(`Could not fetch image for upload (${r.status})`);
+    blob = await r.blob();
+  }
+
+  const form = new FormData();
+  form.append('files', blob, filename);
+
+  const headers: Record<string, string> = {};
+  if (authHeader) headers['Authorization'] = authHeader;
+
+  const res = await fetch(`${HF_SPACE}/upload`, {
+    method: 'POST',
+    headers,
+    body: form,
+    signal: AbortSignal.timeout(20_000),
+  });
+
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`HF upload failed (${res.status}): ${t.slice(0, 200)}`);
+  }
+
+  const paths = await res.json() as string[];
+  if (!paths?.[0]) throw new Error('HF upload returned no file path');
+  return paths[0];
+}
+
 async function runWithHuggingFace(
   userImage: string,
   garmentImage: string,
   garmentDesc: string,
   seed: number,
 ): Promise<string> {
-  const session_hash = Math.random().toString(36).slice(2, 14);
+  const hfToken   = process.env.HUGGINGFACE_TOKEN;
+  const authHeader = hfToken ? `Bearer ${hfToken}` : undefined;
 
-  // Gradio 4.x queue/join — fn_index 0 is the only (/tryon) endpoint
-  const hfToken = process.env.HUGGINGFACE_TOKEN;
-  const hfHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (hfToken) hfHeaders['Authorization'] = `Bearer ${hfToken}`;
+  // ── 1. Upload both images to the HF Space ──────────────────────────────
+  const [humanPath, garmentPath] = await Promise.all([
+    uploadImageToHF(userImage,    'human.jpg',   authHeader),
+    uploadImageToHF(garmentImage, 'garment.jpg', authHeader),
+  ]);
+
+  // ── 2. Queue the prediction ─────────────────────────────────────────────
+  const session_hash = Math.random().toString(36).slice(2, 14);
+  const joinHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authHeader) joinHeaders['Authorization'] = authHeader;
 
   const joinRes = await fetch(`${HF_SPACE}/queue/join`, {
     method: 'POST',
-    headers: hfHeaders,
+    headers: joinHeaders,
     body: JSON.stringify({
       data: [
-        // param 1: dict (ImageEditor) — background holds the human image
-        { background: { url: userImage, orig_name: 'human.jpg' }, layers: [], composite: null },
-        // param 2: garm_img (FileData)
-        { url: garmentImage, orig_name: 'garment.jpg' },
-        // param 3-7: scalars
+        // param 1: ImageEditor dict — background = human photo (server path)
+        { background: { path: humanPath, orig_name: 'human.jpg' }, layers: [], composite: null },
+        // param 2: garment FileData (server path)
+        { path: garmentPath, orig_name: 'garment.jpg' },
+        // params 3-7: garment_des, is_checked, is_checked_crop, denoise_steps, seed
         garmentDesc, true, false, 30, seed,
       ],
       event_data: null,
@@ -52,16 +106,20 @@ async function runWithHuggingFace(
       session_hash,
     }),
   });
-  if (!joinRes.ok) throw new Error(`HF queue join failed (${joinRes.status})`);
+  if (!joinRes.ok) {
+    const t = await joinRes.text().catch(() => '');
+    throw new Error(`HF queue join failed (${joinRes.status}): ${t.slice(0, 200)}`);
+  }
 
-  // Read SSE events until process_completed
+  // ── 3. Stream SSE until process_completed ──────────────────────────────
   const sseHeaders: Record<string, string> = { Accept: 'text/event-stream' };
-  if (hfToken) sseHeaders['Authorization'] = `Bearer ${hfToken}`;
+  if (authHeader) sseHeaders['Authorization'] = authHeader;
+
   const sseRes = await fetch(`${HF_SPACE}/queue/data?session_hash=${session_hash}`, {
     headers: sseHeaders,
-    signal: AbortSignal.timeout(55_000),
+    signal: AbortSignal.timeout(120_000),
   });
-  if (!sseRes.ok) throw new Error('HF SSE connection failed');
+  if (!sseRes.ok) throw new Error(`HF SSE connection failed (${sseRes.status})`);
 
   const reader = sseRes.body!.getReader();
   const dec    = new TextDecoder();
@@ -80,27 +138,10 @@ async function runWithHuggingFace(
       try { msg = JSON.parse(line.slice(6)); } catch { continue; }
 
       if (msg.msg === 'process_completed') {
-        // Robustly extract image from all known HF output shapes:
-        // { output: { data: [FileData|string, ...] } }
-        // { output: [string] }
-        // { output: { image: string } }
-        // { output: string }
-        const out = msg.output;
-        let img: unknown = null;
-
-        if (out && typeof out === 'object' && 'data' in (out as object)) {
-          // Most common: { data: [img, masked_img] }
-          const arr = (out as { data: unknown[] }).data;
-          img = Array.isArray(arr) ? arr[0] : null;
-        } else if (Array.isArray(out)) {
-          img = out[0];
-        } else if (out && typeof out === 'object' && 'image' in (out as object)) {
-          img = (out as { image: unknown }).image;
-        } else if (out && typeof out === 'object' && 'url' in (out as object)) {
-          img = out;
-        } else {
-          img = out;
-        }
+        // Output shape: { data: [result_FileData, mask_FileData] }
+        const out  = msg.output;
+        const data = (out as { data?: unknown[] } | undefined)?.data;
+        const img  = Array.isArray(data) ? data[0] : (Array.isArray(out) ? out[0] : out);
 
         if (typeof img === 'string' && img.startsWith('http')) return img;
         if (img && typeof img === 'object') {
@@ -108,13 +149,13 @@ async function runWithHuggingFace(
           if (typeof o.url === 'string')  return o.url;
           if (typeof o.path === 'string') return `${HF_SPACE}/file=${o.path}`;
         }
-        // Log the raw output for debugging instead of hard-throwing
-        throw new Error(`Unexpected HF output shape: ${JSON.stringify(out).slice(0, 300)}`);
+        throw new Error(`Unexpected HF output: ${JSON.stringify(out).slice(0, 400)}`);
       }
       if (msg.msg === 'process_errored') {
-        throw new Error(`HF error: ${(msg.output as { error?: string } | undefined)?.error ?? 'unknown'}`);
+        const e = (msg.output as { error?: string } | undefined)?.error ?? JSON.stringify(msg).slice(0, 200);
+        throw new Error(`HF model error: ${e}`);
       }
-      if (msg.msg === 'queue_full') throw new Error('HuggingFace queue is full — try again in a moment');
+      if (msg.msg === 'queue_full') throw new Error('HuggingFace queue is full — retry in ~30s');
     }
   }
 
