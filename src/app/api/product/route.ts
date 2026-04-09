@@ -1,5 +1,7 @@
 import * as cheerio from 'cheerio';
 
+export const runtime = 'nodejs';
+
 // ─── Affiliate tag ────────────────────────────────────────────────────────────
 const AMAZON_AFFILIATE_TAG = '97870-21';
 

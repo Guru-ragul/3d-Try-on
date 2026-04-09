@@ -1,6 +1,7 @@
 import { calculateFit, type Measurements } from '@/lib/fit';
 import { CATEGORY_CONFIG, type ProductCategory } from '@/lib/product';
 
+export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 // Accept both data URIs and plain https:// URLs
