@@ -134,6 +134,12 @@ function PhotoUpload({ preview, hint, onImage, onClear }: {
               <p className="text-sm font-semibold text-slate-300">Click to upload your photo</p>
               <p className="text-xs text-slate-500 mt-1">{hint}</p>
             </div>
+            <ul className="text-left text-xs text-slate-500 space-y-1 mt-1">
+              <li>✅ Stand straight, arms slightly away</li>
+              <li>✅ Wear fitted / light-coloured clothing</li>
+              <li>✅ Plain or simple background</li>
+              <li>❌ Avoid coats or thick layers</li>
+            </ul>
           </div>
         )}
         <input type="file" accept="image/jpeg,image/png,image/webp" className="hidden" onChange={handleChange} />
@@ -432,7 +438,8 @@ export default function TryOnPage() {
   const [measures,    setMeasures]    = useState<MeasureState>({ height: '', weight: '', chest: '', waist: '', hips: '' });
   const [productState, setProductState] = useState<ProductState>({ status: 'idle' });
   const [tryOnState,   setTryOnState]   = useState<TryOnState>({ status: 'idle' });
-  const [provider,     setProvider]     = useState<'replicate' | 'hf'>('replicate');
+  // Always use HuggingFace (free). Replicate kept in API for future use.
+  const provider = 'hf' as const;
 
   const garmentImageUrl = productState.status === 'done' ? productState.imageUrl : null;
   const cfg = category ? CATEGORY_CONFIG[category] : null;
@@ -503,60 +510,35 @@ export default function TryOnPage() {
         ? await compressImage(userImage!)
         : userImage!;
 
-      // HF is synchronous so only 1 call; Replicate uses 2 seeds for variety
-      const SEEDS = provider === 'hf' ? [42] : [42, 137];
-      setTryOnState({ status: 'loading', message: provider === 'hf' ? 'Running on HuggingFace… (~45–90s)' : 'Starting 2 AI generations…' });
-      const starts = await Promise.all(SEEDS.map(s => startPrediction(compressedUser, s)));
+      setTryOnState({ status: 'loading', message: 'Running AI try-on… (~45–90s)' });
+      const starts = await Promise.all([startPrediction(compressedUser, 42)]);
 
-      // ── HuggingFace: response contains imageUrl directly (no polling) ────
-      if (provider === 'hf') {
-        const result = starts[0];
-        if (result?.error) {
-          setTryOnState({ status: 'error', message: result.error });
-          return;
-        }
-        if (result?.imageUrl) {
-          setTryOnState({ status: 'done', imageUrl: result.imageUrl, fit: result.fit ?? null, alternatives: [] });
-          setStep(2);
-          return;
-        }
-        setTryOnState({ status: 'error', message: 'HuggingFace did not return an image. Try again.' });
+      // HuggingFace returns imageUrl directly (no polling needed)
+      const result = starts[0];
+      if (result?.imageUrl) {
+        setTryOnState({ status: 'done', imageUrl: result.imageUrl, fit: result.fit ?? null, alternatives: [] });
+        setStep(2);
         return;
       }
-
-      // ── Replicate: poll prediction ids ──────────────────────────────────────
-      const validStarts = starts.filter(d => !!d.id);
-      if (validStarts.length === 0) {
-        setTryOnState({ status: 'error', message: starts[0]?.error ?? 'Failed to start generation.' });
-        return;
-      }
-      const fit = validStarts[0].fit ?? null;
-      const ids = validStarts.map(d => d.id!);
-
-      setTryOnState({ status: 'loading', message: 'AI is generating your try-on… (~30–45s)' });
-
-      // Poll all ids; show the first that succeeds, collect the rest as alternatives
-      let shown = false;
-
-      await Promise.all(ids.map(async id => {
-        const url = await pollUntilDone(id);
-        if (!url) return;
-        if (!shown) {
-          shown = true;
-          setTryOnState({ status: 'done', imageUrl: url, fit, alternatives: [] });
+      if (result?.error) {
+        // Fallback: show product image so user isn't left blank
+        const fallbackUrl = productState.status === 'done' ? productState.imageUrl : null;
+        if (fallbackUrl) {
+          setTryOnState({ status: 'done', imageUrl: fallbackUrl, fit: result.fit ?? null, alternatives: [] });
           setStep(2);
-        } else {
-          setTryOnState(prev =>
-            prev.status === 'done'
-              ? { ...prev, alternatives: [...prev.alternatives, url] }
+          // Non-blocking toast via a quick state update
+          setTimeout(() => {
+            setTryOnState(prev => prev.status === 'done'
+              ? { ...prev, alternatives: [] }
               : prev
-          );
+            );
+          }, 0);
+          return;
         }
-      }));
-
-      if (!shown) {
-        setTryOnState({ status: 'error', message: 'Generation timed out or failed. Please try again.' });
+        setTryOnState({ status: 'error', message: result.error });
+        return;
       }
+      setTryOnState({ status: 'error', message: 'AI did not return an image. Model may be loading — try again in ~30s.' });
     } catch (err) {
       setTryOnState({ status: 'error', message: (err as Error).message });
     }
@@ -760,22 +742,6 @@ export default function TryOnPage() {
               </div>
             </section>
 
-            {/* Provider toggle */}
-            <div className="flex items-center justify-center gap-1 p-1 bg-slate-800 rounded-xl text-xs font-semibold">
-              <button
-                onClick={() => setProvider('replicate')}
-                className={`flex-1 py-2 rounded-lg transition-colors ${provider === 'replicate' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-              >
-                Replicate <span className="opacity-60 font-normal">(paid)</span>
-              </button>
-              <button
-                onClick={() => setProvider('hf')}
-                className={`flex-1 py-2 rounded-lg transition-colors ${provider === 'hf' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}
-              >
-                HuggingFace <span className="opacity-60 font-normal">(free)</span>
-              </button>
-            </div>
-
             <button
               onClick={handleGenerate}
               disabled={!canGenerate || tryOnState.status === 'loading'}
@@ -801,6 +767,7 @@ export default function TryOnPage() {
                 <div>
                   <p className="font-semibold mb-1">Generation failed</p>
                   <p>{tryOnState.message}</p>
+                  <p className="text-xs text-red-400 mt-1 opacity-75">💡 Model may be waking up — wait 30s and retry.</p>
                 </div>
                 <button
                   onClick={() => { setTryOnState({ status: 'idle' }); handleGenerate(); }}

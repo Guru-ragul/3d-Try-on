@@ -79,13 +79,36 @@ async function runWithHuggingFace(
       try { msg = JSON.parse(line.slice(6)); } catch { continue; }
 
       if (msg.msg === 'process_completed') {
-        const data = (msg.output as { data?: unknown[] } | undefined)?.data;
-        if (!Array.isArray(data)) throw new Error('No data array in HF output');
-        const img = data[0] as { url?: string; path?: string } | string | null;
-        if (typeof img === 'string')   return img;
-        if (img?.url)                  return img.url;
-        if (img?.path)                 return `${HF_SPACE}/file=${img.path}`;
-        throw new Error('Cannot extract image URL from HF output');
+        // Robustly extract image from all known HF output shapes:
+        // { output: { data: [FileData|string, ...] } }
+        // { output: [string] }
+        // { output: { image: string } }
+        // { output: string }
+        const out = msg.output;
+        let img: unknown = null;
+
+        if (out && typeof out === 'object' && 'data' in (out as object)) {
+          // Most common: { data: [img, masked_img] }
+          const arr = (out as { data: unknown[] }).data;
+          img = Array.isArray(arr) ? arr[0] : null;
+        } else if (Array.isArray(out)) {
+          img = out[0];
+        } else if (out && typeof out === 'object' && 'image' in (out as object)) {
+          img = (out as { image: unknown }).image;
+        } else if (out && typeof out === 'object' && 'url' in (out as object)) {
+          img = out;
+        } else {
+          img = out;
+        }
+
+        if (typeof img === 'string' && img.startsWith('http')) return img;
+        if (img && typeof img === 'object') {
+          const o = img as Record<string, unknown>;
+          if (typeof o.url === 'string')  return o.url;
+          if (typeof o.path === 'string') return `${HF_SPACE}/file=${o.path}`;
+        }
+        // Log the raw output for debugging instead of hard-throwing
+        throw new Error(`Unexpected HF output shape: ${JSON.stringify(out).slice(0, 300)}`);
       }
       if (msg.msg === 'process_errored') {
         throw new Error(`HF error: ${(msg.output as { error?: string } | undefined)?.error ?? 'unknown'}`);
